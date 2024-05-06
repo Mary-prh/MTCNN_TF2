@@ -75,47 +75,16 @@ class Train:
         with tf.GradientTape() as tape:
             classifier_output, bbox_output, landmark_output = self.model(images, training=True)
 
-            loss_weights = get_model_config(net_type = self.net)[1]
+            loss_weights = get_model_config(net_type=self.net)[1]
 
-            mask_cls = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, 0))
+            # Apply OHEM for classification loss
+            loss_classifier = cls_ohem(classifier_output, labels) * loss_weights['classifier']
 
-            # Loss functions
-            classification_loss = SparseCategoricalCrossentropy(from_logits=False)
-            bbox_loss           = MeanSquaredError()
-            landmark_loss       = MeanSquaredError()
+            # Apply OHEM for bounding box regression loss
+            loss_bbox = bbox_ohem(bbox_output, rois, labels) * loss_weights['bbox_regress']
 
-            loss_classifier_full = classification_loss(tf.boolean_mask(labels, mask_cls), 
-                                              tf.boolean_mask(classifier_output, mask_cls))
-            loss_classifier_full_flat = tf.reshape(loss_classifier_full, [-1])
-            
-            num_samples = tf.size(loss_classifier_full_flat, out_type=tf.float32)  
-            num_hard_examples = tf.cast(0.7 * num_samples, tf.int32)
-            
-            if num_hard_examples > 0:
-                _ , indices = tf.nn.top_k(loss_classifier_full_flat, k=num_hard_examples, sorted=True)
-                # Use only the selected hard examples for calculating the mean classification loss
-                loss_classifier = tf.reduce_mean(tf.gather(loss_classifier_full_flat, indices)) * loss_weights['classifier']
-            else:
-                loss_classifier = 0
-            
-            loss_classifier += 1e-6 * tf.reduce_sum(classifier_output)
-            # Mask for bounding box regression (only positives and part faces)
-            mask_bbox = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, -1))
-            if tf.reduce_any(mask_bbox):
-                loss_bbox = bbox_loss(tf.boolean_mask(rois, mask_bbox), 
-                                    tf.boolean_mask(bbox_output, mask_bbox)) * loss_weights['bbox_regress']
-            else:
-                loss_bbox = 0
-            loss_bbox += 1e-6 * tf.reduce_sum(bbox_output)
-            
-            # Mask for landmark localization (only landmark faces)
-            mask_landmark = tf.equal(labels, -2)
-            if tf.reduce_any(mask_landmark):
-                loss_landmark = landmark_loss(tf.boolean_mask(landmarks, mask_landmark), 
-                                            tf.boolean_mask(landmark_output, mask_landmark)) * loss_weights['landmark_pred']
-            else:
-                loss_landmark = 0
-            loss_landmark += 1e-6 * tf.reduce_sum(landmark_output)
+            # Apply OHEM for landmark loss
+            loss_landmark = landmark_ohem(landmark_output, landmarks, labels) * loss_weights['landmark_pred']
 
             # Update metrics
             self.classification_accuracy_metric.update_state(labels, classifier_output)
@@ -126,6 +95,63 @@ class Train:
         gradients = tape.gradient(total_loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
         return total_loss, loss_classifier, loss_bbox, loss_landmark
+
+
+    # def __train_step(self, images, labels, rois, landmarks, optimizer):
+    #     with tf.GradientTape() as tape:
+    #         classifier_output, bbox_output, landmark_output = self.model(images, training=True)
+
+    #         loss_weights = get_model_config(net_type = self.net)[1]
+
+    #         mask_cls = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, 0))
+
+    #         # Loss functions
+    #         classification_loss = SparseCategoricalCrossentropy(from_logits=False)
+    #         bbox_loss           = MeanSquaredError()
+    #         landmark_loss       = MeanSquaredError()
+
+    #         loss_classifier_full = classification_loss(tf.boolean_mask(labels, mask_cls), 
+    #                                           tf.boolean_mask(classifier_output, mask_cls))
+    #         loss_classifier_full_flat = tf.reshape(loss_classifier_full, [-1])
+            
+    #         num_samples = tf.size(loss_classifier_full_flat, out_type=tf.float32)  
+    #         num_hard_examples = tf.cast(0.7 * num_samples, tf.int32)
+            
+    #         if num_hard_examples > 0:
+    #             _ , indices = tf.nn.top_k(loss_classifier_full_flat, k=num_hard_examples, sorted=True)
+    #             # Use only the selected hard examples for calculating the mean classification loss
+    #             loss_classifier = tf.reduce_mean(tf.gather(loss_classifier_full_flat, indices)) * loss_weights['classifier']
+    #         else:
+    #             loss_classifier = 0
+            
+    #         loss_classifier += 1e-6 * tf.reduce_sum(classifier_output)
+    #         # Mask for bounding box regression (only positives and part faces)
+    #         mask_bbox = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, -1))
+    #         if tf.reduce_any(mask_bbox):
+    #             loss_bbox = bbox_loss(tf.boolean_mask(rois, mask_bbox), 
+    #                                 tf.boolean_mask(bbox_output, mask_bbox)) * loss_weights['bbox_regress']
+    #         else:
+    #             loss_bbox = 0
+    #         loss_bbox += 1e-6 * tf.reduce_sum(bbox_output)
+            
+    #         # Mask for landmark localization (only landmark faces)
+    #         mask_landmark = tf.equal(labels, -2)
+    #         if tf.reduce_any(mask_landmark):
+    #             loss_landmark = landmark_loss(tf.boolean_mask(landmarks, mask_landmark), 
+    #                                         tf.boolean_mask(landmark_output, mask_landmark)) * loss_weights['landmark_pred']
+    #         else:
+    #             loss_landmark = 0
+    #         loss_landmark += 1e-6 * tf.reduce_sum(landmark_output)
+
+    #         # Update metrics
+    #         self.classification_accuracy_metric.update_state(labels, classifier_output)
+    #         self.bbox_accuracy_metric.update_state(rois, bbox_output)
+
+    #         total_loss = (loss_classifier + loss_bbox + loss_landmark)
+
+    #     gradients = tape.gradient(total_loss, self.model.trainable_variables)
+    #     optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+    #     return total_loss, loss_classifier, loss_bbox, loss_landmark
 
     def __print_progress(self, iteration, total, loss, prefix='', suffix='', decimals=1, length=100, fill='>'):
         """

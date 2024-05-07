@@ -5,7 +5,7 @@ from MTCNN_config import *
 from read_tfrecod_tf2 import read_single_tfrecord
 from mtcnn import *
 from losses import *
-from keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
+# from keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
 
 gpus = tf.config.experimental.list_physical_devices("GPU")
 for gpu in gpus:
@@ -19,34 +19,36 @@ class Train:
             
             ):
         self.net = net
-        self.model = self.__init_model()
+        self.model      = self.__init_model()
         self.batch_size = config.BATCH_SIZE
-        self.lr_base = config.LR_BASE
+        self.base_dir   = config.BASE_DIR
+        self.lr_base    = config.LR_BASE
         self.reduce_lr_callback = self.__my_callback()
-        self.optimizer = self.__init_optimizer()
-        self.dataset, self.num_batches = self.__load_dataset()
+        self.optimizer  = self.__init_optimizer()
+        self.dataset    = self.__load_dataset(mode='train')
+        self.num_batches= self.__define_batches()
         self.classification_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy()
         self.bbox_accuracy_metric = tf.keras.metrics.MeanSquaredError()
         self.checkpoint_path = "checkpoints/"
         if not os.path.exists(self.checkpoint_path):
             os.makedirs(self.checkpoint_path)
-        self.checkpoint_prefix = os.path.join(self.checkpoint_path, f"ckpt_{self.net}_")
-        self.checkpoint = tf.train.Checkpoint(optimizer=self.optimizer, model=self.model)
+        self.checkpoint_prefix  = os.path.join(self.checkpoint_path, f"ckpt_{self.net}_")
+        self.checkpoint         = tf.train.Checkpoint(optimizer=self.optimizer, model=self.model)
 
-
-
-    def __load_dataset(self,):
-        base_dir = config.BASE_DIR
-        dataset_dir = os.path.join(base_dir,f'{self.net}/train_{self.net}_landmark.tfrecord_shuffle')
-        dataset = read_single_tfrecord(dataset_dir, self.batch_size, self.net)
-
+    def __load_dataset(self,mode):
+        dataset_dir = os.path.join(self.base_dir,f'{self.net}/{mode}_{self.net}_landmark.tfrecord_shuffle')
+        dataset     = read_single_tfrecord(dataset_dir, self.batch_size, self.net)
+        print(f'load dataset from: {self.net}/train_{self.net}_landmark.tfrecord_shuffle')
+        return dataset
+    
+    def __define_batches(self,):
         # Calculate expected batches and compare with actual count
-        landmark_dir = os.path.join(base_dir,f'{self.net}/train_{self.net}_landmark.txt')
+        landmark_dir = os.path.join(self.base_dir,f'{self.net}/train_{self.net}_landmark.txt')
         f = open(landmark_dir, 'r')
         num_samples = len(f.readlines())
         num_batches = math.ceil(num_samples / self.batch_size)
-        print(f'load dataset from: {self.net}/train_{self.net}_landmark.tfrecord_shuffle')
-        return dataset , num_batches
+        return num_batches
+
     
     def __init_model(self,):
         if self.net == "PNet":
@@ -96,8 +98,66 @@ class Train:
         optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
         return total_loss, loss_classifier, loss_bbox, loss_landmark
 
+    def __print_progress(self, iteration, total, loss, prefix='', suffix='', decimals=1, length=100, fill='>'):
+        """
+        Call in a loop to create terminal progress bar
+        @params:
+            iteration   - Required  : current iteration (Int)
+            total       - Required  : total iterations (Int)
+            prefix      - Optional  : prefix string (Str)
+            suffix      - Optional  : suffix string (Str)
+            decimals    - Optional  : positive number of decimals in percent complete (Int)
+            length      - Optional  : character length of bar (Int)
+            fill        - Optional  : bar fill character (Str)
+        """
+        percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+        filled_length = int(length * iteration // total)
+        bar = fill * filled_length + '-' * (length - filled_length)
+        # print(f'\r{prefix} |{bar}| {percent}% Loss: {loss:.4f} {suffix}', end='\r')
+        print(f'\r{prefix}/{total} |{bar}| {percent}% Loss: {loss:.4f} Classification Accuracy: {self.classification_accuracy_metric.result():.4f} {suffix}', end='\r')
+        if iteration == total:
+            print()
+    
+    def train(self, num_epochs):
+        for epoch in range(num_epochs):
+            print(f'Epoch {epoch + 1}/{num_epochs}')
+            epoch_loss = 0
+            num_processed_batches = 0
+            epoch_classification_accuracy = 0
+            epoch_bbox_accuracy = 0
+            for i, (images, labels, rois, landmarks) in enumerate(self.dataset):
+                loss_values, _, _, _ = self.__train_step(images=images, labels=labels, rois=rois, landmarks=landmarks, 
+                                        optimizer= self.optimizer)  
+                current_loss = loss_values
+                epoch_loss += current_loss
+                epoch_classification_accuracy += self.classification_accuracy_metric.result()
+                epoch_bbox_accuracy += self.bbox_accuracy_metric.result()
+                num_processed_batches += 1
 
-    # def __train_step(self, images, labels, rois, landmarks, optimizer):
+                self.__print_progress(i + 1, self.num_batches, current_loss, prefix=i, suffix='Complete', length=40)
+                
+                if num_processed_batches >= self.num_batches:
+                    break
+            
+            average_epoch_loss = epoch_loss / num_processed_batches
+            average_epoch_classification_accuracy = epoch_classification_accuracy / num_processed_batches
+            average_epoch_bbox_accuracy = epoch_bbox_accuracy / num_processed_batches
+            self.reduce_lr_callback.on_epoch_end(epoch, logs={'loss': average_epoch_loss})
+
+            print(f'/nEpoch {epoch+1}/naverage_epoch_loss: {average_epoch_loss:.4f}/n\
+                  average_epoch_classification_accuracy: {average_epoch_classification_accuracy}/n\
+                  average_epoch_bbox_accuracy: {average_epoch_bbox_accuracy}')
+            
+            self.checkpoint.save(file_prefix=self.checkpoint_prefix + f"epoch_{epoch+1}")
+
+        print("Training complete!")
+
+
+if __name__ == "__main__":
+    trainer = Train(net='PNet')
+    trainer.train(num_epochs=10)  
+
+ # def __train_step(self, images, labels, rois, landmarks, optimizer):
     #     with tf.GradientTape() as tape:
     #         classifier_output, bbox_output, landmark_output = self.model(images, training=True)
 
@@ -152,71 +212,6 @@ class Train:
     #     gradients = tape.gradient(total_loss, self.model.trainable_variables)
     #     optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
     #     return total_loss, loss_classifier, loss_bbox, loss_landmark
-
-    def __print_progress(self, iteration, total, loss, prefix='', suffix='', decimals=1, length=100, fill='>'):
-        """
-        Call in a loop to create terminal progress bar
-        @params:
-            iteration   - Required  : current iteration (Int)
-            total       - Required  : total iterations (Int)
-            prefix      - Optional  : prefix string (Str)
-            suffix      - Optional  : suffix string (Str)
-            decimals    - Optional  : positive number of decimals in percent complete (Int)
-            length      - Optional  : character length of bar (Int)
-            fill        - Optional  : bar fill character (Str)
-        """
-        percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-        filled_length = int(length * iteration // total)
-        bar = fill * filled_length + '-' * (length - filled_length)
-        # print(f'\r{prefix} |{bar}| {percent}% Loss: {loss:.4f} {suffix}', end='\r')
-        print(f'\r{prefix}/{total} |{bar}| {percent}% Loss: {loss:.4f} Classification Accuracy: {self.classification_accuracy_metric.result():.4f} {suffix}', end='\r')
-        if iteration == total:
-            print()
-    
-    def train(self, num_epochs):
-        for epoch in range(num_epochs):
-            print(f'Epoch {epoch + 1}/{num_epochs}')
-            epoch_loss = 0
-            num_processed_batches = 0
-            epoch_classification_accuracy = 0
-            epoch_bbox_accuracy = 0
-            for i, (images, labels, rois, landmarks) in enumerate(self.dataset):
-                loss_values, _, _, _ = self.__train_step(images=images, labels=labels, rois=rois, landmarks=landmarks, 
-                                        optimizer= self.optimizer)  
-                current_loss = loss_values
-                epoch_loss += current_loss
-                epoch_classification_accuracy += self.classification_accuracy_metric.result()
-                epoch_bbox_accuracy += self.bbox_accuracy_metric.result()
-                num_processed_batches += 1
-                # Update the progress bar with the correct loss value
-                self.__print_progress(i + 1, self.num_batches, current_loss, prefix=i, suffix='Complete', length=40)
-                
-                if num_processed_batches >= self.num_batches:
-                    break
-            
-            average_epoch_loss = epoch_loss / num_processed_batches
-            average_epoch_classification_accuracy = epoch_classification_accuracy / num_processed_batches
-            average_epoch_bbox_accuracy = epoch_bbox_accuracy / num_processed_batches
-            self.reduce_lr_callback.on_epoch_end(epoch, logs={'loss': average_epoch_loss})
-
-            print(f'/nEpoch {epoch+1}/naverage_epoch_loss: {average_epoch_loss:.4f}/n\
-                  average_epoch_classification_accuracy: {average_epoch_classification_accuracy}/n\
-                  average_epoch_bbox_accuracy: {average_epoch_bbox_accuracy}')
-            
-            self.checkpoint.save(file_prefix=self.checkpoint_prefix + f"epoch_{epoch+1}")
-            
-
-        print("Training complete!")
-
-
-if __name__ == "__main__":
-    # Create an instance of the Train class
-    trainer = Train(net='PNet')
-
-    # Start training with a specified number of epochs
-    trainer.train(num_epochs=10)  # Specify the number of epochs you want to train for
-
-
 
 
     

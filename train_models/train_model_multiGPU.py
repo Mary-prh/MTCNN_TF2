@@ -12,28 +12,27 @@ for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True)
 
 class Train:
-    def __init__(
-            self,
-            net, # PNet
+    def __init__(self, net, strategy=None):
+        self.strategy = strategy if strategy is not None else tf.distribute.get_strategy()
+        with self.strategy.scope():
+            self.net = net
+            self.model      = self.__init_model()
+            self.batch_size = config.BATCH_SIZE
+            self.base_dir   = config.BASE_DIR
+            self.lr_base    = config.LR_BASE
+            self.reduce_lr_callback = self.__my_callback()
+            self.optimizer  = self.__init_optimizer()
+            self.dataset    = self.__load_dataset(mode='train')
+            self.num_batches= self.__define_batches()
+            self.classification_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy()
+            self.bbox_accuracy_metric = tf.keras.metrics.MeanSquaredError()
+            self.checkpoint_path = "checkpoints/"
+            if not os.path.exists(self.checkpoint_path):
+                os.makedirs(self.checkpoint_path)
+            self.checkpoint_prefix  = os.path.join(self.checkpoint_path, f"ckpt_{self.net}_")
+            self.checkpoint         = tf.train.Checkpoint(optimizer=self.optimizer, model=self.model)
 
-            
-            ):
-        self.net = net
-        self.model      = self.__init_model()
-        self.batch_size = config.BATCH_SIZE
-        self.base_dir   = config.BASE_DIR
-        self.lr_base    = config.LR_BASE
-        self.reduce_lr_callback = self.__my_callback()
-        self.optimizer  = self.__init_optimizer()
-        self.dataset    = self.__load_dataset(mode='train')
-        self.num_batches= self.__define_batches()
-        self.classification_accuracy_metric = tf.keras.metrics.SparseCategoricalAccuracy()
-        self.bbox_accuracy_metric = tf.keras.metrics.MeanSquaredError()
-        self.checkpoint_path = "checkpoints/"
-        if not os.path.exists(self.checkpoint_path):
-            os.makedirs(self.checkpoint_path)
-        self.checkpoint_prefix  = os.path.join(self.checkpoint_path, f"ckpt_{self.net}_")
-        self.checkpoint         = tf.train.Checkpoint(optimizer=self.optimizer, model=self.model)
+            self.__train_step = tf.function(self.__train_step)
 
     def __load_dataset(self,mode):
         dataset_dir = os.path.join(self.base_dir,f'{self.net}/{mode}_{self.net}_landmark.tfrecord_shuffle')
@@ -98,6 +97,10 @@ class Train:
         optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
         return total_loss, loss_classifier, loss_bbox, loss_landmark
 
+    def __distributed_train_step(self, images, labels, rois, landmarks):
+            per_replica_losses = self.strategy.run(self.__train_step, args=(images, labels, rois, landmarks, self.optimizer))
+            return self.strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None)
+
     def __print_progress(self, iteration, total, loss, prefix='', suffix='', decimals=1, length=100, fill='>'):
         """
         Call in a loop to create terminal progress bar
@@ -126,8 +129,10 @@ class Train:
             epoch_classification_accuracy = 0
             epoch_bbox_accuracy = 0
             for i, (images, labels, rois, landmarks) in enumerate(self.dataset):
-                loss_values, _, _, _ = self.__train_step(images=images, labels=labels, rois=rois, landmarks=landmarks, 
-                                        optimizer= self.optimizer)  
+                # loss_values, _, _, _ = self.__train_step(images=images, labels=labels, rois=rois, landmarks=landmarks, 
+                #                         optimizer= self.optimizer)  
+                loss_values, _, _, _ = self.__distributed_train_step(images, labels, rois, landmarks)
+                
                 current_loss = loss_values
                 epoch_loss += current_loss
                 epoch_classification_accuracy += self.classification_accuracy_metric.result()
@@ -154,8 +159,10 @@ class Train:
 
 
 if __name__ == "__main__":
-    trainer = Train(net='PNet')
-    trainer.train(num_epochs=10)  
+    strategy = tf.distribute.MirroredStrategy()
+    with strategy.scope():
+        trainer = Train(net='PNet')
+        trainer.train(num_epochs=10)  
 
  # def __train_step(self, images, labels, rois, landmarks, optimizer):
     #     with tf.GradientTape() as tape:

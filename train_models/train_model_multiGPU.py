@@ -1,3 +1,7 @@
+"""
+Distributed training across multiple devices (GPUs)
+Model: MTCNN
+"""
 import os
 import math
 import tensorflow as tf
@@ -6,6 +10,8 @@ from read_tfrecod_tf2 import read_single_tfrecord
 from mtcnn import *
 from losses import *
 # from keras.losses import SparseCategoricalCrossentropy, MeanSquaredError
+# Set log level to suppress warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 gpus = tf.config.experimental.list_physical_devices("GPU")
 for gpu in gpus:
@@ -17,7 +23,10 @@ class Train:
         with self.strategy.scope():
             self.net = net
             self.model      = self.__init_model()
-            self.batch_size = config.BATCH_SIZE
+            batch_size = config.BATCH_SIZE
+            if tf.distribute.has_strategy():
+                self.batch_size = batch_size * self.strategy.num_replicas_in_sync
+                print(">>>> num_replicas_in_sync: %d, batch_size: %d" % (strategy.num_replicas_in_sync, self.batch_size))
             self.base_dir   = config.BASE_DIR
             self.lr_base    = config.LR_BASE
             self.reduce_lr_callback = self.__my_callback()
@@ -37,6 +46,10 @@ class Train:
     def __load_dataset(self,mode):
         dataset_dir = os.path.join(self.base_dir,f'{self.net}/{mode}_{self.net}_landmark.tfrecord_shuffle')
         dataset     = read_single_tfrecord(dataset_dir, self.batch_size, self.net)
+        if tf.distribute.has_strategy():
+            data_options = tf.data.Options()
+            data_options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.DATA
+            dataset = dataset.with_options(data_options)
         print(f'load dataset from: {self.net}/train_{self.net}_landmark.tfrecord_shuffle')
         return dataset
     
@@ -47,7 +60,6 @@ class Train:
         num_samples = len(f.readlines())
         num_batches = math.ceil(num_samples / self.batch_size)
         return num_batches
-
     
     def __init_model(self,):
         if self.net == "PNet":
@@ -59,7 +71,7 @@ class Train:
         return model
     
     def __init_optimizer(self,):
-        optimizer = tf.keras.optimizers.SGD(learning_rate = self.lr_base, momentum=0.9)
+        optimizer = tf.keras.optimizers.experimental.SGD(learning_rate = self.lr_base, momentum=0.9)
         return optimizer
     
     def __my_callback(self,):
@@ -72,6 +84,20 @@ class Train:
                             )
         return reduce_lr_callback
     
+    # def apply_gradients_with_sparse_handling(self, gradients, variables, optimizer):
+    # # Convert gradients to dense only where necessary
+    #     def convert_to_dense(g):
+    #         return g if not isinstance(g, tf.IndexedSlices) else tf.convert_to_tensor(g)
+        
+    #     gradients = [convert_to_dense(g) for g in gradients]
+    #     optimizer.apply_gradients(zip(gradients, variables))
+    def __convert_sparse_to_dense(self, gradients):
+        """Convert sparse gradients to dense for efficient computation."""
+        return [
+            tf.convert_to_tensor(g) if isinstance(g, tf.IndexedSlices) else g
+            for g in gradients
+        ]
+    @tf.autograph.experimental.do_not_convert
     def __train_step(self, images, labels, rois, landmarks, optimizer):
         with tf.GradientTape() as tape:
             classifier_output, bbox_output, landmark_output = self.model(images, training=True)
@@ -94,7 +120,11 @@ class Train:
             total_loss = (loss_classifier + loss_bbox + loss_landmark)
 
         gradients = tape.gradient(total_loss, self.model.trainable_variables)
+        gradients = self.__convert_sparse_to_dense(gradients)
         optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+
+        # self.apply_gradients_with_sparse_handling(gradients, self.model.trainable_variables, optimizer)
+    
         return total_loss, loss_classifier, loss_bbox, loss_landmark
 
     def __distributed_train_step(self, images, labels, rois, landmarks):
@@ -161,64 +191,8 @@ class Train:
 if __name__ == "__main__":
     strategy = tf.distribute.MirroredStrategy()
     with strategy.scope():
-        trainer = Train(net='PNet')
+        trainer = Train(net='PNet', strategy=strategy)
         trainer.train(num_epochs=10)  
-
- # def __train_step(self, images, labels, rois, landmarks, optimizer):
-    #     with tf.GradientTape() as tape:
-    #         classifier_output, bbox_output, landmark_output = self.model(images, training=True)
-
-    #         loss_weights = get_model_config(net_type = self.net)[1]
-
-    #         mask_cls = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, 0))
-
-    #         # Loss functions
-    #         classification_loss = SparseCategoricalCrossentropy(from_logits=False)
-    #         bbox_loss           = MeanSquaredError()
-    #         landmark_loss       = MeanSquaredError()
-
-    #         loss_classifier_full = classification_loss(tf.boolean_mask(labels, mask_cls), 
-    #                                           tf.boolean_mask(classifier_output, mask_cls))
-    #         loss_classifier_full_flat = tf.reshape(loss_classifier_full, [-1])
-            
-    #         num_samples = tf.size(loss_classifier_full_flat, out_type=tf.float32)  
-    #         num_hard_examples = tf.cast(0.7 * num_samples, tf.int32)
-            
-    #         if num_hard_examples > 0:
-    #             _ , indices = tf.nn.top_k(loss_classifier_full_flat, k=num_hard_examples, sorted=True)
-    #             # Use only the selected hard examples for calculating the mean classification loss
-    #             loss_classifier = tf.reduce_mean(tf.gather(loss_classifier_full_flat, indices)) * loss_weights['classifier']
-    #         else:
-    #             loss_classifier = 0
-            
-    #         loss_classifier += 1e-6 * tf.reduce_sum(classifier_output)
-    #         # Mask for bounding box regression (only positives and part faces)
-    #         mask_bbox = tf.logical_or(tf.equal(labels, 1), tf.equal(labels, -1))
-    #         if tf.reduce_any(mask_bbox):
-    #             loss_bbox = bbox_loss(tf.boolean_mask(rois, mask_bbox), 
-    #                                 tf.boolean_mask(bbox_output, mask_bbox)) * loss_weights['bbox_regress']
-    #         else:
-    #             loss_bbox = 0
-    #         loss_bbox += 1e-6 * tf.reduce_sum(bbox_output)
-            
-    #         # Mask for landmark localization (only landmark faces)
-    #         mask_landmark = tf.equal(labels, -2)
-    #         if tf.reduce_any(mask_landmark):
-    #             loss_landmark = landmark_loss(tf.boolean_mask(landmarks, mask_landmark), 
-    #                                         tf.boolean_mask(landmark_output, mask_landmark)) * loss_weights['landmark_pred']
-    #         else:
-    #             loss_landmark = 0
-    #         loss_landmark += 1e-6 * tf.reduce_sum(landmark_output)
-
-    #         # Update metrics
-    #         self.classification_accuracy_metric.update_state(labels, classifier_output)
-    #         self.bbox_accuracy_metric.update_state(rois, bbox_output)
-
-    #         total_loss = (loss_classifier + loss_bbox + loss_landmark)
-
-    #     gradients = tape.gradient(total_loss, self.model.trainable_variables)
-    #     optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
-    #     return total_loss, loss_classifier, loss_bbox, loss_landmark
 
 
     

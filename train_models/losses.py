@@ -67,24 +67,54 @@ def bbox_ohem(bbox_pred, bbox_target, label):
     return tf.reduce_mean(square_error)
 
 
+# def landmark_ohem(landmark_pred, landmark_target, label):
+#     # Mask to keep only landmarks with label -2
+#     landmark_pred = tf.reshape(landmark_pred, [-1, 10])
+#     # print("landmark_pred, landmark_target shapes:" , landmark_pred.shape, landmark_target.shape)
+#     mask_landmark = tf.equal(label, -2)
+
+#     # Apply mask
+#     valid_landmark_pred = tf.boolean_mask(landmark_pred, mask_landmark)
+#     valid_landmark_target = tf.boolean_mask(landmark_target, mask_landmark)
+
+#     if tf.size(valid_landmark_pred) == 0:
+#         return tf.constant(0.0, dtype=tf.float32)
+
+#     square_error = tf.square(valid_landmark_pred - valid_landmark_target)
+#     square_error = tf.reduce_sum(square_error, axis=1)
+
+#     keep_num = tf.cast(tf.shape(valid_landmark_pred)[0], dtype=tf.int32)
+#     _, k_index = tf.nn.top_k(square_error, k=keep_num)
+#     square_error = tf.gather(square_error, k_index)
+
+#     return tf.reduce_mean(square_error)
+
 def landmark_ohem(landmark_pred, landmark_target, label):
+    """Calculate landmark loss with Online Hard Example Mining (OHEM)."""
     # Mask to keep only landmarks with label -2
     landmark_pred = tf.reshape(landmark_pred, [-1, 10])
-    # print("landmark_pred, landmark_target shapes:" , landmark_pred.shape, landmark_target.shape)
     mask_landmark = tf.equal(label, -2)
 
     # Apply mask
     valid_landmark_pred = tf.boolean_mask(landmark_pred, mask_landmark)
     valid_landmark_target = tf.boolean_mask(landmark_target, mask_landmark)
 
-    if tf.size(valid_landmark_pred) == 0:
+    # Count the number of valid landmarks
+    num_valid_landmarks = tf.shape(valid_landmark_pred)[0]
+
+    def compute_loss():
+        square_error = tf.square(valid_landmark_pred - valid_landmark_target)
+        square_error = tf.reduce_sum(square_error, axis=1)
+
+        keep_num = tf.cast(tf.shape(valid_landmark_pred)[0], dtype=tf.int32)
+        _, k_index = tf.nn.top_k(square_error, k=keep_num)
+        square_error = tf.gather(square_error, k_index)
+
+        return tf.reduce_mean(square_error)
+
+    def return_zero_loss():
         return tf.constant(0.0, dtype=tf.float32)
 
-    square_error = tf.square(valid_landmark_pred - valid_landmark_target)
-    square_error = tf.reduce_sum(square_error, axis=1)
+    # Conditionally compute loss based on the number of valid landmarks
+    return tf.cond(num_valid_landmarks > 0, compute_loss, return_zero_loss)
 
-    keep_num = tf.cast(tf.shape(valid_landmark_pred)[0], dtype=tf.int32)
-    _, k_index = tf.nn.top_k(square_error, k=keep_num)
-    square_error = tf.gather(square_error, k_index)
-
-    return tf.reduce_mean(square_error)

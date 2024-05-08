@@ -30,7 +30,7 @@ def random_flip_images(image_batch, label_batch, roi_batch,landmark_batch):
     image_batch = tf.map_fn(lambda idx: tf.cond(flip_cond[idx], 
                                                 lambda: flip_image(idx), 
                                                 lambda: image_batch[idx]), 
-                            tf.range(tf.shape(image_batch)[0], dtype=tf.int64), dtype=tf.float32)
+                            tf.range(tf.shape(image_batch)[0], dtype=tf.int64), fn_output_signature=tf.float32)
 
     # Flip landmarks corresponding to the flipped images, if they are landmarks
     def flip_landmarks(landmarks):
@@ -43,7 +43,7 @@ def random_flip_images(image_batch, label_batch, roi_batch,landmark_batch):
     landmark_batch = tf.map_fn(lambda idx: tf.cond(flip_cond[idx] & tf.reduce_any(tf.equal(flip_indexes[:, 0], idx)), 
                                                    lambda: flip_landmarks(landmark_batch[idx]), 
                                                    lambda: landmark_batch[idx]), 
-                               tf.range(tf.shape(landmark_batch)[0], dtype=tf.int64), dtype=tf.float32)
+                               tf.range(tf.shape(landmark_batch)[0], dtype=tf.int64), fn_output_signature=tf.float32)
 
     return image_batch, label_batch, roi_batch, landmark_batch
 
